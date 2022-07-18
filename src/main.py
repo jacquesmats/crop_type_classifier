@@ -3,61 +3,96 @@ import json
 import os
 import glob
 from tqdm import tqdm
-import random
 from utils import utils
-from utils.model import Rice3Ch
+from tensorflow import keras
+import json
+import zipfile
+
 
 if __name__ == '__main__':
 
-    input_dir = "/Users/matheus/Documents/datasets/crop_types/train_rice/tiles/"
-    target_dir = "/Users/matheus/Documents/datasets/crop_types/train_rice/labels/"
-    model_name = "croptype_rice_rgb_jan2021"
-    img_size = (256, 256)
-    num_classes = 2
-    batch_size = 32
-    val_samples = 512
-    nch = 3
+    # print("Creating DS")
+    # utils.create_dataset("/Users/matheus/Downloads/crop_DEZ_2020")
+    parser = argparse.ArgumentParser(prog='trixie',
+                                     description='Process and predict master dataset  \n\n'
+                                                 'Obs: Will be executed in the given order.'
+                                                 'Following steps available: \n'
+                                                 ' 1. Process IDL files: Perform collocation of a S1 and S2 image \n'
+                                                 ' 2. Create SAR image: Creates a 3 channel image if SAR features \n', formatter_class=argparse.RawTextHelpFormatter)
+    parser.add_argument('Steps', metavar='S', type=int, nargs='*', help='steps to be performed')
+    parser.add_argument('-s2c','--sen2cor', type=str, help='Use Sen2Cor to convert Level 1C to 2A')
+    parser.add_argument('-c','--crop', type=str, help='Crop a scene in small pieces, receive a folder path')
+    parser.add_argument('-t','--train', nargs='+', type=str, help='Train neural network. Needs crop(rice,orange), images dir and epochs')
+    parser.add_argument('-e','--evaluate', nargs='+', type=str, help='Evaluate neural network. Needs predicted mask and target')
+    parser.add_argument('-m','--mask', nargs='+', type=str, help='Create a mask with all predictions')
+    parser.add_argument('-n','--ndvi', type=str, help='Create NDVI images based on scenes provided')
 
-    input_img_paths = sorted(
-        [
-            os.path.join(input_dir, fname)
-            for fname in os.listdir(input_dir)
-            if fname.endswith(".tif")
-        ]
-    )
-    target_img_paths = sorted(
-        [
-            os.path.join(target_dir, fname)
-            for fname in os.listdir(target_dir)
-            if fname.endswith(".tif") and not fname.startswith(".")
-        ]
-    )
+    args = parser.parse_args()
 
-    assert len(input_img_paths) == len(target_img_paths), "Oh no! {} of images is different from {} of labels".format(len(input_img_paths), len(target_img_paths))
+    if args.sen2cor:
 
-    # Build model
-    model = utils.get_unet(dropout = 0.20, batchnorm = True, n_channels=nch)
+        print("\nConverting Level 1C to 2A\n")
 
-    # Split img paths into a training and a validation set
-    random.Random(1337).shuffle(input_img_paths)
-    random.Random(1337).shuffle(target_img_paths)
+        os.system(f"/Users/matheus/Downloads/Sen2Cor-02.10.01-Darwin64/bin/L2A_Process --resolution 10 {args.sen2cor}")
 
-    train_input_img_paths = input_img_paths[:-val_samples]
-    train_target_img_paths = target_img_paths[:-val_samples]
+    if args.crop:
 
-    val_input_img_paths = input_img_paths[-val_samples:]
-    val_target_img_paths = target_img_paths[-val_samples:]
+        print("\nCreating dataset cropping images\n")
 
-    # Instantiate data Sequences for each split
-    train_gen = Rice3Ch(
-        batch_size, img_size, train_input_img_paths, train_target_img_paths
-    )
+        utils.create_dataset(args.crop)
 
-    val_gen = Rice3Ch(
-        batch_size, img_size, val_input_img_paths, val_target_img_paths
-    )
+    if args.train:
+        print("\nTraining Neural Network\n")
+        
+        crop_type = args.train[0]
+        train_dir = args.train[1]
+        epochs = int(args.train[2])
 
-    print("\nStart training... \n")
-    utils.train_unet(model, model_name, train_gen, val_gen, 50)
+        utils.cli_train(crop_type, train_dir, epochs)
 
-    print("\nModel trained \n")
+    if args.evaluate:
+
+        print("\nEvaluating created mask\n")
+
+        print(f"\nPrediction: {args.evaluate[0]}\Label: {args.evaluate[1]}\n")
+
+        utils.cli_evaluate(args.evaluate[0], args.evaluate[1])
+
+    if args.mask:
+
+        print("\nCreating scene mask\n")
+
+        utils.cli_prediction_mask(args.mask[0], args.mask[1], bulky=False)
+
+    if args.ndvi:
+
+        IN_PATH = os.path.join(args.ndvi, '')
+
+        files = glob.glob(IN_PATH + '*.zip')
+
+        print("\n{} files found.\n".format(len(files)))
+
+        for n,f in enumerate(files):
+
+            image_name = f[-26:-11]
+
+            image_level = f.split('/')[-1].split('_')[1][-3:]
+            assert image_level == 'L2A', "Processing Level not recognized. Current only L2A is supported."
+
+            img_zip = zipfile.ZipFile(f, 'r')
+
+            band_file_names = []
+
+            for elem in img_zip.namelist():
+                parts = elem.split('/')
+                if image_level == 'L1C':
+                    if len(parts) > 4 and parts[3] == 'IMG_DATA' and len(parts[-1]) > 1:
+                        band_file_names.append(elem)
+                elif image_level == 'L2A':
+                    if len(parts) > 5 and len(parts[-1]) > 1:
+                        band_file_names.append(elem)
+
+            print(f"\nCalculating NDVI for {image_name} \n")
+            utils.ndvi(band_file_names, IN_PATH, image_name, img_zip)
+
+
