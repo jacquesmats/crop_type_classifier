@@ -14,6 +14,8 @@ import rasterio as rio
 from utils.model import Rice3Ch, Water3Ch, Rice1Ch, Orange3Ch, Cana3Ch
 from datetime import datetime
 import shutil
+from tensorflow.keras.callbacks import TensorBoard
+from tensorflow.keras.metrics import MeanIoU
 
 
 
@@ -43,6 +45,10 @@ def conv2d_block(input_tensor, n_filters, kernel_size = 3, batchnorm = True):
 def get_unet(nClasses=2, input_height=256, input_width=256, n_filters = 16, dropout = 0.1, batchnorm = True, n_channels=3):
     
     input_img = keras.Input(shape=(input_height,input_width, n_channels))
+
+    # data augmentation layer
+    #aug1 = layers.RandomFlip("horizontal_and_vertical")(input_img)
+    #aug2 = layers.RandomRotation(0.2)(aug1)
 
     # contracting path
     c1 = conv2d_block(input_img, n_filters=n_filters*1, kernel_size=3, batchnorm=batchnorm)
@@ -81,7 +87,7 @@ def get_unet(nClasses=2, input_height=256, input_width=256, n_filters = 16, drop
 
     u9 = layers.Conv2DTranspose(n_filters*1, (3, 3), strides=(2, 2), padding='same') (c8)
     u9 = layers.concatenate([u9, c1], axis=3)
-    u9 = layers.Dropout(dropout)(u9)
+    u9 = layers.Dropout(dropout/2)(u9)
     c9 = conv2d_block(u9, n_filters=n_filters*1, kernel_size=3, batchnorm=batchnorm)
     
     outputs = layers.Conv2D(1, (1, 1), activation='sigmoid') (c9)
@@ -98,11 +104,16 @@ def train_unet(model, model_name, train_gen, val_gen, epochs=10):
     # Configure the model for training.
     # We use the "sparse" version of categorical_crossentropy
     # because our target data is integers.
-    opt = keras.optimizers.Adam(learning_rate=0.001)
+    opt = keras.optimizers.Adam(learning_rate=0.01)
+
+    log_dir = "logs/fit/" + datetime.now().strftime("%Y%m%d-%H%M%S")
+    tensorboard_callback = TensorBoard(log_dir=log_dir, histogram_freq=1)
+
     model.compile(optimizer=opt, loss="binary_crossentropy")
 
     callbacks = [
-        keras.callbacks.ModelCheckpoint(path + model_name + ".h5", save_best_only=True)
+        keras.callbacks.ModelCheckpoint(path + model_name + ".h5", save_best_only=True),
+        tensorboard_callback
     ]
 
     # Train the model, doing validation at the end of each epoch.
@@ -460,9 +471,7 @@ def cli_train(crop, train_dir, epochs, nch=3):
         model = keras.models.load_model(model_path)
         print(f"\nModel loaded.\n")
     else: 
-        model = get_unet(dropout = 0.20, batchnorm = True, n_channels=nch)
-        # REMOVE THIS REMOVE THIS REMOVE THIS VVVV
-        # model.load_weights("/Users/matheus/Documents/masters/crop_type_classifier/src/models/bkp_before_trash/croptype_rice_rgb_jan2021_2days.h5")
+        model = get_unet(dropout = 0.40, batchnorm = True, n_channels=nch)
         print(f"\nNew model created.\n")
 
     print(f"\nModel name: {model_name}\nTraining images: {len(input_img_paths)}\nValidation images: {val_samples}\n")
@@ -503,7 +512,7 @@ def cli_train(crop, train_dir, epochs, nch=3):
 
     for i, label in enumerate(tqdm(val_target_img_paths)):
     #     l = np.array(PIL.Image.open(label))
-        l =  gdal.Open(label).ReadAsArray()[1,:,:]
+        l =  gdal.Open(label).ReadAsArray()[0,:,:] # Layer 0: Rice/Water, Layer 1:Rice/Soya, Layer 2: Water
         l = l[np.newaxis, :, :, np.newaxis]
         #all_labels[i,:,:,:] = l 
         all_labels = np.vstack((all_labels, l))

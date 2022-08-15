@@ -5,6 +5,7 @@ import glob
 from tqdm import tqdm
 from utils import utils
 from tensorflow import keras
+import tensorflow as tf
 import json
 import zipfile
 
@@ -42,6 +43,7 @@ if __name__ == '__main__':
         utils.create_dataset(args.crop)
 
     if args.train:
+        #with tf.device('/cpu:0'):
         print("\nTraining Neural Network\n")
         
         crop_type = args.train[0]
