@@ -8,6 +8,7 @@ from tensorflow import keras
 import tensorflow as tf
 import json
 import zipfile
+from PIL import Image
 
 
 if __name__ == '__main__':
@@ -27,14 +28,70 @@ if __name__ == '__main__':
     parser.add_argument('-e','--evaluate', nargs='+', type=str, help='Evaluate neural network. Needs predicted mask and target')
     parser.add_argument('-m','--mask', nargs='+', type=str, help='Create a mask with all predictions')
     parser.add_argument('-n','--ndvi', type=str, help='Create NDVI images based on scenes provided')
+    parser.add_argument('-i','--infer', nargs='+', type=str, help='Use the model to infer in a giving path and evaluate')
 
     args = parser.parse_args()
 
+    print(args)
+
     if args.sen2cor:
+        
+        folder_path = args.sen2cor
 
         print("\nConverting Level 1C to 2A\n")
 
-        os.system(f"/Users/matheus/Downloads/Sen2Cor-02.10.01-Darwin64/bin/L2A_Process --resolution 10 {args.sen2cor}")
+        os.system(f"/Users/matheus/Downloads/Sen2Cor-02.10.01-Darwin64/bin/L2A_Process --resolution 10 {folder_path}")
+
+        print("\nExtracting TCI image and converting to .tiff\n")
+
+        path_lst = folder_path.split("/")[:-1]
+        dir_up = os.path.join("/", *path_lst)
+
+        for root, dirs, files in os.walk(dir_up):
+            for file in files:
+                if file.endswith(".jp2") and "_TCI_10m" in file:
+                    jp2_file = os.path.join(root, file)
+
+                    img_date = file.split("_")[1]
+
+                    img_date_month = img_date[4:6]
+
+                    # Transform to standard name format
+                    if img_date_month == "01":
+                        img_date_month = "JAN"
+                    elif img_date_month == "02":
+                        img_date_month = "FEV"
+                    elif img_date_month == "03":
+                        img_date_month = "MAR"
+                    elif img_date_month == "04":
+                        img_date_month = "APR"
+                    elif img_date_month == "05":
+                        img_date_month = "MAY"
+                    elif img_date_month == "06":
+                        img_date_month = "JUN"
+                    elif img_date_month == "07":
+                        img_date_month = "JUL"
+                    elif img_date_month == "08":
+                        img_date_month = "AUG"
+                    elif img_date_month == "09":
+                        img_date_month = "SEP"
+                    elif img_date_month == "10":
+                        img_date_month = "OCT"
+                    elif img_date_month == "11":
+                        img_date_month = "NOV"
+                    elif img_date_month == "12":
+                        img_date_month = "DEZ"
+                    else:
+                        img_date_month = "ERR"
+
+                    img_date_trunk = img_date_month + img_date[:4]
+
+                    new_name = file[1:].replace(".jp2", ".tiff").replace(img_date, img_date_trunk).replace("_TCI_10m", "_RGB")
+                    tif_file = dir_up + "/" + new_name
+                    
+                    Image.open(jp2_file).save(tif_file)
+
+                    print("\nImage save at:\n{tif_file}\n")
 
     if args.crop:
 
@@ -51,6 +108,12 @@ if __name__ == '__main__':
         epochs = int(args.train[2])
 
         utils.cli_train(crop_type, train_dir, epochs)
+
+    if args.infer:
+
+        print("\nEvaluating model\n")
+
+        utils.cli_inference(args.infer[0], args.infer[1])
 
     if args.evaluate:
 

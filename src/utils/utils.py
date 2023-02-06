@@ -11,11 +11,13 @@ import PIL
 import random
 from keras import backend as K
 import rasterio as rio
-from utils.model import Rice3Ch, Water3Ch, Rice1Ch, Orange3Ch, Cana3Ch
+from utils.model import Rice3Ch, Water3Ch, Rice1Ch, Orange3Ch, Cana3Ch, Building3Ch
 from datetime import datetime
 import shutil
 from tensorflow.keras.callbacks import TensorBoard
 from tensorflow.keras.metrics import MeanIoU
+from tensorflow.keras.regularizers import l2
+import tensorflow_addons as tfa
 
 
 
@@ -104,12 +106,16 @@ def train_unet(model, model_name, train_gen, val_gen, epochs=10):
     # Configure the model for training.
     # We use the "sparse" version of categorical_crossentropy
     # because our target data is integers.
-    opt = keras.optimizers.Adam(learning_rate=0.01)
+    opt = keras.optimizers.Adam(learning_rate=0.001)
+
+    # class weights
+    #cw = {0:10/8,1:10/2}
 
     log_dir = "logs/fit/" + datetime.now().strftime("%Y%m%d-%H%M%S")
     tensorboard_callback = TensorBoard(log_dir=log_dir, histogram_freq=1)
 
-    model.compile(optimizer=opt, loss="binary_crossentropy")
+    #tfa.losses.SigmoidFocalCrossEntropy()
+    model.compile(optimizer=opt, loss='binary_crossentropy', metrics=["BinaryAccuracy"])
 
     callbacks = [
         keras.callbacks.ModelCheckpoint(path + model_name + ".h5", save_best_only=True),
@@ -117,8 +123,45 @@ def train_unet(model, model_name, train_gen, val_gen, epochs=10):
     ]
 
     # Train the model, doing validation at the end of each epoch.
-    h = model.fit(train_gen, epochs=epochs, validation_data=val_gen, callbacks=callbacks)
+    h = model.fit(train_gen, epochs=epochs, 
+                  validation_data=val_gen, 
+                  callbacks=callbacks)
+                  #, sample_weight=cw)
     model.save(path+ model_name)
+
+def predict_unet(model, imgs_path):
+    ''' Receive a path contaning .tif images and crop them into 256x256 pixels and save in the same path
+
+    Args:
+        imgs_path: List containing several images for test
+
+    Returns:
+
+    '''
+
+    list_iou = []
+
+    for i,path in enumerate(tqdm(imgs_path)):
+                
+        img_arr = gdal.Open(path).ReadAsArray()
+
+        if img_arr.shape == (3, 256, 256):
+
+            img = np.moveaxis(img_arr, 0, -1)
+            img = img[np.newaxis, :, :,:3]
+
+            predict_mask = model.predict(img)
+
+            label_path = path.replace("tiles", "labels")
+            label_path = label_path.replace("_15_", "_1_") # REPLACE TEMPORARIO
+            label_path = label_path.replace("_RGB_", "_LABEL_") # REPLACE TEMPORARIO
+            label_arr = gdal.Open(label_path).ReadAsArray()
+            label_mask = np.moveaxis(label_arr, 0, -1)
+
+            iou = logical_iou(predict_mask[0],label_mask[:,:,:1])
+            list_iou.append(iou)
+
+    return np.average(list_iou)
 
 # -------------------------------------------------------------------------------
 
@@ -134,7 +177,7 @@ def logical_iou(result1,result2):
     intersection = np.logical_and(result1, result2)
     union = np.logical_or(result1, result2)
     iou_score = np.sum(intersection) / np.sum(union)
-    print("IoU is %s" % iou_score)
+    return iou_score
 
 # -------------------------------------------------------------------------------
 
@@ -147,6 +190,7 @@ def dice_coef(y_true, y_pred, smooth=1):
 # ===============================================================================
 # IMAGE PROCESSING  
 # ===============================================================================
+
 
 def create_prediction_mask(model, imgs_path, crop_type):
     ''' Receive a path contaning .tif images and crop them into 256x256 pixels and save in the same path
@@ -422,19 +466,26 @@ def cli_evaluate(predicted, label):
     maska = ai_label.copy()
     ai_label[maska==255.] = 1
     ai_label[maska!=255.] = 0
-    
-    print(logical_iou(ai_label,real_label))
+
+    iou_score = logical_iou(ai_label,real_label)
+    print("IoU is %s" % iou_score)
 
 def cli_train(crop, train_dir, epochs, nch=3):
 
     if crop == "rice":
         ModelNCh = Rice3Ch
+        crop_ch = 0
     elif crop == "orange":
         ModelNCh = Orange3Ch
+        crop_ch = 0
     elif crop == "cana":
         ModelNCh = Cana3Ch
+        crop_ch = 1
     elif crop == "water":
         ModelNCh = Water3Ch
+    elif crop == "building":
+        ModelNCh = Building3Ch
+        crop_ch = 0
     else: print(f"Couldn't find {crop} model") 
     
     input_dir = os.path.join(train_dir, "tiles/")
@@ -502,7 +553,6 @@ def cli_train(crop, train_dir, epochs, nch=3):
 
     # Generate predictions for all images in the validation set
 
-    val_gen = ModelNCh(batch_size, img_size, val_input_img_paths, val_target_img_paths)
     val_preds = model.predict(val_gen)
 
     print("\nEvaluating Model\n")
@@ -512,7 +562,7 @@ def cli_train(crop, train_dir, epochs, nch=3):
 
     for i, label in enumerate(tqdm(val_target_img_paths)):
     #     l = np.array(PIL.Image.open(label))
-        l =  gdal.Open(label).ReadAsArray()[0,:,:] # Layer 0: Rice/Water, Layer 1:Rice/Soya, Layer 2: Water
+        l =  gdal.Open(label).ReadAsArray()[crop_ch,:,:] # Layer 0: Rice/Water, Layer 1:Rice/Soya, Layer 2: Water
         l = l[np.newaxis, :, :, np.newaxis]
         #all_labels[i,:,:,:] = l 
         all_labels = np.vstack((all_labels, l))
@@ -568,3 +618,23 @@ def cli_prediction_mask(model_name, input_dir,models_dir="/models", bulky=False)
 
     print("Done.")
     
+def cli_inference(model_name, input_dir,models_dir="/models"):
+
+    print("Model manually selected")
+    model_path = os.path.abspath(os.getcwd()) + f"/models/{model_name}"
+    model = keras.models.load_model(model_path)
+    
+    print(f"\nModel: {model_name}\n")
+
+    input_img_paths = sorted(
+        [
+            os.path.join(input_dir, fname)
+            for fname in os.listdir(input_dir)
+            if fname.endswith(".tif")
+        ]
+    )
+
+    print(f"\nN: {len(input_img_paths)}\n")
+    avg_iou = predict_unet(model, input_img_paths)
+
+    print(f"Done. Average IoU: {avg_iou}")
